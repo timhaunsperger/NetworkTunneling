@@ -10,92 +10,122 @@ public class Client
     private static bool connected = false;
     private static int Upstream = 0;
     private static int Downstream = 0;
+    private static byte[] proxyData = new byte[proxyClient.ReceiveBufferSize];
+    private static byte[] serverData = new byte[serverClient.ReceiveBufferSize];
+    private static Thread _HandlerThread = new Thread(DataHandler);
+    private static IPEndPoint serverEndpoint = new IPEndPoint(IPAddress.Loopback,  25564);
+    private static IPEndPoint proxyEndpoint;
     
     public static void Main()
     {
-        Console.WriteLine("Please Enter Proxy IP, Skip for localhost");
+        Console.WriteLine("Please Enter Proxy IP, Skip for default");
         
         try
         {
             var ip = Console.ReadLine();
-            var endPoint = new IPEndPoint(IPAddress.Parse(String.IsNullOrEmpty(ip) ? "127.0.0.1" : ip),  25565);
-            Console.WriteLine("Connecting ...");
-            proxyClient.Connect(endPoint);
+            proxyEndpoint = new IPEndPoint(IPAddress.Parse(String.IsNullOrEmpty(ip) ? "18.216.178.230" : ip),  25565);
         }
         catch (Exception e)
         {
             Console.WriteLine(e);
             Main();
+            return;
         }
-        
-        Console.WriteLine($"Connected to Proxy at {proxyClient.Client.RemoteEndPoint}\n");
-        
-        Task.WaitAll(Task.Run(ThroughputMonitor), Task.Run(ProxyDataHandler));
 
+        _HandlerThread.Start();
+        Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+        ThroughputMonitor();
+    
     }
     
-    private static async void ThroughputMonitor()
+    private static void ThroughputMonitor()
     {
         while (true)
         {
-            var timer = Task.Delay(1000);
-            Console.Write($"\r Upstream {Upstream}B/s | Downstream {Downstream}B/s");
-            await timer;
+            Thread.Sleep(1000);
+            Console.Write($"\r Upstream {Upstream}B/s | Downstream {Downstream}B/s            ");
+            Upstream = 0;
+            Downstream = 0;
         }
     }
-    
-    private static void ProxyDataHandler()
+
+    private static void EstablishTunnel() // Wait for proxy to have client before continuing
     {
-        
-        byte[] data = new byte[proxyClient.ReceiveBufferSize];
+        byte[] connReq = Encoding.UTF8.GetBytes("CLIENT CONNECTED");
+        while (Encoding.UTF8.GetString(proxyData[0..connReq.Length]) != "CLIENT CONNECTED")
+        {
+            var l = proxyClient.GetStream().Read(proxyData, 0, connReq.Length);
+            Console.WriteLine(Encoding.UTF8.GetString(proxyData[0..connReq.Length]));
+        }
+        serverClient.Close();
+        serverClient = new TcpClient();
+        serverClient.Connect(serverEndpoint);
+        proxyClient.GetStream().Write(Encoding.UTF8.GetBytes("TUNNEL ESTABLISHED"));
+    }
+
+    private static async void DataHandler()
+    {
         while (true)
         {
-            var l = proxyClient.GetStream().Read(data, 0, proxyClient.ReceiveBufferSize);
-            //Console.WriteLine($"<PROXY==>MCSERVER | {l} BYTES>");
-            Upstream += l;
+            Console.WriteLine($"Connecting to Proxy ...");
+            try
+            {
+                proxyClient.Close();
+                proxyClient = new TcpClient();
+                proxyClient.Connect(proxyEndpoint);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Unable to connect to proxy at {proxyEndpoint.Address}, Retrying in 5 seconds");
+                Thread.Sleep(5000);
+                continue;
+            }
             
-            if (!connected)
-            {
-                serverClient.Connect(new IPEndPoint(IPAddress.Loopback, 25564));
-                Console.WriteLine($"Connected to Server at {serverClient.Client.RemoteEndPoint}");
-                connected = true;
-                Task.Run(ServerDataHandler);
-            }
-            serverClient.GetStream().Write(data[..l]);
+            Console.WriteLine($"Connected to Proxy at {proxyClient.Client.RemoteEndPoint}\n");
+            EstablishTunnel();
+            
+            Console.WriteLine("Ready");
+            var prxTask = ForwardDataAsync(proxyData, proxyClient, serverClient, true);
+            var srvTask = ForwardDataAsync(serverData, serverClient, proxyClient, false);
+            await Task.WhenAny(prxTask, srvTask);
+            Console.WriteLine("--DISCONNECTED--");
         }
+
     }
     
-    private static void ServerDataHandler()
+    private static async Task ForwardDataAsync(byte[] buffer, TcpClient origin, TcpClient target, bool isUpstream)
     {
-        byte[] data = new byte[serverClient.ReceiveBufferSize];
+        int length;
+        var cliDscMsg = Encoding.UTF8.GetBytes("CLIENT DISCONNECT");
         while (true)
         {
-            var l = serverClient.GetStream().Read(data, 0, serverClient.ReceiveBufferSize);
-            //Console.WriteLine($"<SERVER==>PROXY | {l} BYTES>");
-            Downstream += 1;
-            proxyClient.GetStream().Write(data[..l]);
-        }
-    }
-
-    private int DecodeLength(byte[] data)
-    {
-        int value = 0;
-        int position = 0;
-        byte currentByte;
-
-        for (int i = 0; i < data.Length; i++)
-        {
-            currentByte = data[i];
-            value += (currentByte & 0x7f) << position;
-
-            if ((currentByte & 0x80) == 0) break;
-
-            position += 7;
-            if (position >= 32)
+            try
             {
-                throw new Exception("too big");
+                //Forward data
+                length = await origin.GetStream().ReadAsync(buffer);
+                if (Encoding.UTF8.GetString(buffer[0..cliDscMsg.Length]) == "CLIENT DISCONNECT")
+                {
+                    Console.WriteLine("CLIENT DISCONNECT");
+                    serverClient.Close();
+                    proxyClient.Close();
+                    return;
+                }
+                await target.GetStream().WriteAsync(new ReadOnlyMemory<byte>(buffer, 0, length));
+            
+                //Log data transfer
+                if (isUpstream)
+                { Upstream += length; }
+                else
+                { Downstream += length; }
+                
+                //Break if disconnected
+                if (length == 0) { throw new Exception("Null Packet Exception"); }
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.Message);
+                return;
             }
         }
-        return value;
     }
 }

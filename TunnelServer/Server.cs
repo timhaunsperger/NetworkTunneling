@@ -1,78 +1,124 @@
-﻿using System.Collections;
-using System.Net;
+﻿using System.Net;
 using System.Net.Sockets;
+using System.Threading;
+using System;
+using System.Collections;
+using System.Diagnostics;
+using System.Drawing;
 using System.Text;
 
 public static class Server
 {
-    private static TcpClient client = new();
-    private static TcpClient host;
-    private static TcpListener listener = new (new IPEndPoint(IPAddress.Loopback, 25565));
+    private static TcpClient _client = new TcpClient();
+    private static TcpClient _host = new TcpClient();
+    private static TcpListener _listener = new TcpListener(new IPEndPoint(IPAddress.Any, 25565));
     private static int Upstream = 0;
     private static int Downstream = 0;
+    private static Thread _HandlerThread = new Thread(DataHandler);
+    private static byte[] _connReq = Encoding.UTF8.GetBytes("CLIENT CONNECTED");
+    private static byte[] clientData = new byte[_client.ReceiveBufferSize];
+    private static byte[] hostData = new byte[_host.ReceiveBufferSize];
 
     public static void Main()
     {
-        //Wait for host/client to connect
-        listener.Start();
-        Console.WriteLine("Listening for Host ...");
-        host = listener.AcceptTcpClient();
-        Console.WriteLine("Connected to Host at " + (host.Client.RemoteEndPoint as IPEndPoint).Address);
-
-        Console.WriteLine("Listening for Client ...");
-        client = listener.AcceptTcpClient();
-        Console.WriteLine("Connected to Client at " + (client.Client.RemoteEndPoint as IPEndPoint).Address);
-
-        //Start to listener loops and monitor throughput
-        var clientHandler = Task.Run(ClientDataHandler);
-        var hostHandler = Task.Run(HostDataHandler);
-        var throughputMonitor = Task.Run(ThroughputMonitor);
+        //Start to listener loops
+        _listener.Start();
+        _HandlerThread.Start();
         
-        //Prevent program end
-        Task.WaitAll(throughputMonitor, clientHandler, hostHandler);
-
+        //Prevent program end and monitor throughput
+        Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
+        ThroughputMonitor();
     }
 
-    private static async void ThroughputMonitor()
+    private static void ThroughputMonitor()
     {
         while (true)
         {
-            var timer = Task.Delay(1000);
-            Console.Write($"\r Upstream {Upstream}B/s | Downstream {Downstream}B/s         ");
+            Console.WriteLine($"{DateTime.Now.ToShortTimeString()}|Upstream {Upstream/10}B/s | Downstream {Downstream/10}B/s         ");
             Downstream = 0;
             Upstream = 0;
-            await timer;
+            Thread.Sleep(10000);
         }
     }
 
-    private static void ClientDataHandler()
+    private static void ConnectClient()
     {
-        byte[] data;
-        while (true)
+        Console.WriteLine("Waiting for Client ...");
+        _client = _listener.AcceptTcpClient();
+        Console.WriteLine("Connected to Client at " + _client.Client.RemoteEndPoint);
+        Console.WriteLine("Waiting for Host confirmation ...");
+        _host.GetStream().Write(_connReq); // Inform host that client connected
+        var expectedResponse = Encoding.UTF8.GetBytes("TUNNEL ESTABLISHED");
+        var length = _host.GetStream().Read(hostData, 0, expectedResponse.Length);
+        if (Encoding.UTF8.GetString(hostData[0..length]) != "TUNNEL ESTABLISHED")
         {
-            data = new byte[client.ReceiveBufferSize];
-            var dataStream = client.GetStream();
-            var l = dataStream.Read(data, 0, client.ReceiveBufferSize);
-
-            //Console.WriteLine($"<CLIENT==>PRXCLI | {l} BYTES>");
-            Upstream += l;
-            
-            host.GetStream().Write(data[..l]);
+            Console.WriteLine(Encoding.UTF8.GetString(hostData[0..length]));
+            Console.WriteLine("Invalid Response from Host, Retrying");
+            Thread.Sleep(5000);
+            ConnectClient();
+            return;
         }
+        Console.WriteLine("Tunnel Established");
     }
 
-    private static void HostDataHandler()
+    private static async void DataHandler()
     {
-        byte[] data = new byte[host.ReceiveBufferSize];
+        //Replace broken connections
+        Task? cliTask = null;
+        Task? hstTask = null;
+        Task? dcTask = null;
         while (true)
         {
-            var dataStream = host.GetStream();
-            var l = dataStream.Read(data, 0, host.ReceiveBufferSize);
-
-            //Console.WriteLine($"<HOST==>MCCLI | {l} BYTES >");
-            Downstream += l;
+            if (dcTask == hstTask) // replace host and client, host disconnect will always disconnect client
+            {
+                _host.Close();
+                Console.WriteLine("Waiting for Host ...");
+                _host = _listener.AcceptTcpClient();
+                Console.WriteLine("Connected to Host at " + _host.Client.RemoteEndPoint);
+                
+                ConnectClient();
+                
+                cliTask = ForwardDataAsync(clientData, _client, _host, true);
+                hstTask = ForwardDataAsync(hostData, _host, _client, false);
+            }
+            if (dcTask == cliTask) // replace client
+            {
+                _host.GetStream().Write(Encoding.UTF8.GetBytes("CLIENT DISCONNECT"));
+                _client.Close();
+                DataHandler();
+                return;
+            }
+            dcTask = await Task.WhenAny(cliTask, hstTask); // detect disconnection
+            Console.WriteLine("--DISCONNECTED--");
+        }
+    }
+    
+    private static async Task ForwardDataAsync(byte[] buffer, TcpClient origin, TcpClient target, bool isUpstream)
+    {
+        int length;
+        while (true)
+        {
+            try
+            {
+                //forward data
+                length = await origin.GetStream().ReadAsync(buffer);
+                await target.GetStream().WriteAsync(new ReadOnlyMemory<byte>(buffer, 0, length));
             
-            client.GetStream().Write(data[..l]);
+                //Log data transfer
+                if (isUpstream)
+                { Upstream += length; }
+                else
+                { Downstream += length; }
+                
+                //Break if disconnected
+                if (length == 0) { throw new Exception("Null Packet Exception"); }
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.Message);
+                return;
+            }
+
         }
     }
 }

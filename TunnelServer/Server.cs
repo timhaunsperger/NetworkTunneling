@@ -1,71 +1,78 @@
-﻿using System.Net;
+﻿using System.Collections;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 
-public class Server
+public static class Server
 {
-    private List<Socket> clients = new();
-    private Socket client;
-    private Socket host;
-    private Socket listenSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.IP);
+    private static TcpClient client = new();
+    private static TcpClient host;
+    private static TcpListener listener = new (new IPEndPoint(IPAddress.Loopback, 25565));
+    private static int Upstream = 0;
+    private static int Downstream = 0;
 
-    public Server()
+    public static void Main()
     {
-        listenSocket.Bind(new IPEndPoint(IPAddress.Loopback, 25565));
-        
+        //Wait for host/client to connect
+        listener.Start();
         Console.WriteLine("Listening for Host ...");
-        listenSocket.Listen(10);
-        host = listenSocket.Accept();
-        Console.WriteLine("Connected to Host!");
+        host = listener.AcceptTcpClient();
+        Console.WriteLine("Connected to Host at " + (host.Client.RemoteEndPoint as IPEndPoint).Address);
+
+        Console.WriteLine("Listening for Client ...");
+        client = listener.AcceptTcpClient();
+        Console.WriteLine("Connected to Client at " + (client.Client.RemoteEndPoint as IPEndPoint).Address);
+
+        //Start to listener loops and monitor throughput
+        var clientHandler = Task.Run(ClientDataHandler);
+        var hostHandler = Task.Run(HostDataHandler);
+        var throughputMonitor = Task.Run(ThroughputMonitor);
         
-        //var clientsTask = Task.Run(AcceptClients);
-        var hostListener = Task.Run(HostDataHandler);
-        var clientListener = Task.Run(ClientDataHandler);
-        Task.WaitAll(new Task[] { clientListener, hostListener, /*clientsTask*/});
+        //Prevent program end
+        Task.WaitAll(throughputMonitor, clientHandler, hostHandler);
+
     }
-    
-    private void ClientDataHandler()
+
+    private static async void ThroughputMonitor()
     {
-        byte[] data = new byte[65536];
-        client = listenSocket.Accept();
-        Console.WriteLine("Connected to " + (client.RemoteEndPoint as IPEndPoint).Address);
         while (true)
         {
-            int k = client.Receive(data);
-            Console.WriteLine($"<CLIENT DATA {k} BYTES>");
-            foreach (var byt in data[..k])
-            {
-                Console.Write(byt);
-            }
-            Console.WriteLine("</DATA>");
-            host.Send(data[..k]);
+            var timer = Task.Delay(1000);
+            Console.Write($"\r Upstream {Upstream}B/s | Downstream {Downstream}B/s         ");
+            Downstream = 0;
+            Upstream = 0;
+            await timer;
         }
     }
 
-    private void HostDataHandler()
+    private static void ClientDataHandler()
     {
-        byte[] data = new byte[65536];
+        byte[] data;
         while (true)
         {
-            int k = host.Receive(data);
-            Console.WriteLine($"<HOST DATA {k} BYTES>");
-            Console.WriteLine(k);
-            for (int i = 0; i < k; i++)
-            {
-                Console.Write(data[k]);
-            }
-            Console.WriteLine("</DATA>");
-            clients[0].Send(data[..k]);
+            data = new byte[client.ReceiveBufferSize];
+            var dataStream = client.GetStream();
+            var l = dataStream.Read(data, 0, client.ReceiveBufferSize);
 
+            //Console.WriteLine($"<CLIENT==>PRXCLI | {l} BYTES>");
+            Upstream += l;
+            
+            host.GetStream().Write(data[..l]);
         }
     }
-    // private void AcceptClients()
-    // {
-    //     Console.WriteLine("Listening for Clients ...");
-    //     while (true)
-    //     {
-    //         
-    //     }
-    // }
-    
+
+    private static void HostDataHandler()
+    {
+        byte[] data = new byte[host.ReceiveBufferSize];
+        while (true)
+        {
+            var dataStream = host.GetStream();
+            var l = dataStream.Read(data, 0, host.ReceiveBufferSize);
+
+            //Console.WriteLine($"<HOST==>MCCLI | {l} BYTES >");
+            Downstream += l;
+            
+            client.GetStream().Write(data[..l]);
+        }
+    }
 }

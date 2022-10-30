@@ -4,7 +4,6 @@ using System.Threading;
 using System;
 using System.Collections;
 using System.Diagnostics;
-using System.Drawing;
 using System.Text;
 
 public static class Server
@@ -30,51 +29,81 @@ public static class Server
         ThroughputMonitor();
     }
 
+    private static string getBytePrefix(int numBytes)
+    {
+        var unit = "B";
+        if (numBytes > 10000)
+        {
+            numBytes /= 1000;
+            unit = "KB";
+            if (numBytes > 10000)
+            {
+                numBytes /= 1000;
+                unit = "MB";
+            }
+        }
+
+        return $"{numBytes} {unit}";
+    }
+    
     private static void ThroughputMonitor()
     {
+        var upstreamTotal = 0;
+        var downstreamTotal = 0;
+        while (Upstream == 0 && Downstream == 0)
+        {
+            Thread.Sleep(500);
+        }
         while (true)
         {
-            Console.WriteLine($"{DateTime.Now.ToShortTimeString()}|Upstream {Upstream/10}B/s | Downstream {Downstream/10}B/s         ");
+            Upstream /= 5;
+            Downstream /= 5;
+            upstreamTotal += Upstream;
+            downstreamTotal += Downstream;
+            Console.Write(
+                $"\r{DateTime.Now.ToShortTimeString()} | " +
+                $"Upstream {getBytePrefix(upstreamTotal)}, {getBytePrefix(Upstream)}/s | " +
+                $"Downstream {getBytePrefix(downstreamTotal)}, {getBytePrefix(Downstream)}/s         ");
             Downstream = 0;
             Upstream = 0;
-            Thread.Sleep(10000);
+            Thread.Sleep(5000);
         }
     }
 
     private static void ConnectClient()
     {
-        Console.WriteLine("Waiting for Client ...");
+        Console.WriteLine("\nWaiting for Client ...");
         _client = _listener.AcceptTcpClient();
-        Console.WriteLine("Connected to Client at " + _client.Client.RemoteEndPoint);
-        Console.WriteLine("Waiting for Host confirmation ...");
+        Console.WriteLine("\nConnected to Client at " + _client.Client.RemoteEndPoint);
+        Console.WriteLine("\nWaiting for Host confirmation ...");
         _host.GetStream().Write(_connReq); // Inform host that client connected
         var expectedResponse = Encoding.UTF8.GetBytes("TUNNEL ESTABLISHED");
         var length = _host.GetStream().Read(hostData, 0, expectedResponse.Length);
-        if (Encoding.UTF8.GetString(hostData[0..length]) != "TUNNEL ESTABLISHED")
+        if (Encoding.UTF8.GetString(new ReadOnlySpan<byte>(hostData, 0, length)) != "TUNNEL ESTABLISHED")
         {
-            Console.WriteLine(Encoding.UTF8.GetString(hostData[0..length]));
-            Console.WriteLine("Invalid Response from Host, Retrying");
+            Console.WriteLine(Encoding.UTF8.GetString(new ReadOnlySpan<byte>(hostData, 0, length)));
+            Console.WriteLine("\nInvalid Response from Host, Retrying");
             Thread.Sleep(5000);
             ConnectClient();
             return;
         }
-        Console.WriteLine("Tunnel Established");
+        Console.WriteLine("\nTunnel Established");
     }
 
     private static async void DataHandler()
     {
         //Replace broken connections
-        Task? cliTask = null;
-        Task? hstTask = null;
-        Task? dcTask = null;
+        Task cliTask = Task.CompletedTask;
+        Task hstTask = Task.CompletedTask;
+        Task dcTask = Task.CompletedTask;
         while (true)
         {
             if (dcTask == hstTask) // replace host and client, host disconnect will always disconnect client
             {
                 _host.Close();
-                Console.WriteLine("Waiting for Host ...");
+                Console.WriteLine("\nWaiting for Host ...");
                 _host = _listener.AcceptTcpClient();
-                Console.WriteLine("Connected to Host at " + _host.Client.RemoteEndPoint);
+                Console.WriteLine("\nConnected to Host at " + _host.Client.RemoteEndPoint);
                 
                 ConnectClient();
                 
@@ -89,7 +118,7 @@ public static class Server
                 return;
             }
             dcTask = await Task.WhenAny(cliTask, hstTask); // detect disconnection
-            Console.WriteLine("--DISCONNECTED--");
+            Console.WriteLine("\n--DISCONNECTED--");
         }
     }
     
@@ -101,8 +130,8 @@ public static class Server
             try
             {
                 //forward data
-                length = await origin.GetStream().ReadAsync(buffer);
-                await target.GetStream().WriteAsync(new ReadOnlyMemory<byte>(buffer, 0, length));
+                length = await origin.GetStream().ReadAsync(buffer, 0, buffer.Length);
+                await target.GetStream().WriteAsync(buffer, 0, length);
             
                 //Log data transfer
                 if (isUpstream)
@@ -111,11 +140,11 @@ public static class Server
                 { Downstream += length; }
                 
                 //Break if disconnected
-                if (length == 0) { throw new Exception("Null Packet Exception"); }
+                if (length == 0) { throw new Exception("\nNull Packet Exception"); }
             }
             catch (Exception e)
             {
-                Console.WriteLine(e.Message);
+                Console.Write(e.Message);
                 return;
             }
 

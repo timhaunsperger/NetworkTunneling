@@ -23,7 +23,7 @@ public class Client
         try
         {
             var ip = Console.ReadLine();
-            proxyEndpoint = new IPEndPoint(IPAddress.Parse(String.IsNullOrEmpty(ip) ? "18.216.178.230" : ip),  25565);
+            proxyEndpoint = new IPEndPoint(IPAddress.Parse(String.IsNullOrEmpty(ip) ? "13.58.233.76" : ip),  25565);
         }
         catch (Exception e)
         {
@@ -40,6 +40,10 @@ public class Client
     
     private static void ThroughputMonitor()
     {
+        while (Upstream == 0 && Downstream == 0)
+        {
+            Thread.Sleep(500);
+        }
         while (true)
         {
             Thread.Sleep(1000);
@@ -119,11 +123,11 @@ public class Client
                 { Downstream += length; }
                 
                 //Break if disconnected
-                if (length == 0) { throw new Exception("Null Packet Exception"); }
+                if (length == 0) { throw new Exception("\nNull Packet Exception"); }
             }
             catch (Exception e)
             {
-                Console.WriteLine(e.Message);
+                Console.Write(e.Message);
                 return;
             }
         }
